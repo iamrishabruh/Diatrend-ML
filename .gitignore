@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Common system files
+.DS_Store
+Thumbs.db
+
+# Logs and local environment files
+*.log
+.env
+
+# Data and model checkpoints (adjust to your needs)
+data/
+raw/
+checkpoints/
+
+# If you store them here, exclude metadata as well
+metadata/
+
+# Other IDE / Editor directories and files
+.vscode/
+.idea/
