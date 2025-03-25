@@ -1,120 +1,132 @@
-# File: app.py
-
 import streamlit as st
 import pandas as pd
-import requests
-import os
-import subprocess
+import plotly.express as px
 import torch
+from io import BytesIO
+from config.config import Config
+from preprocessing.preprocessing import DataProcessor
+from models.ensemble import ensemble_predict
+from models.tabtransformer import TabTransformer
+from models.attention_mlp import AttentionMLP
+from models.gnn_model import PatientGNN
+from torch_geometric.data import Data
 
-import config
-from preprocessing.preprocessing import (
-    load_demographics, load_cgm_sheet, load_bolus_sheet,
-    extract_cgm_features, extract_bolus_features, compute_good_trajectory,
-    extract_demographics_features
-)
-from utils.visualization import plot_glucose_series
+def load_tabtransformer():
+    model = TabTransformer(
+        num_features=Config.NUM_FEATURES,
+        num_classes=Config.NUM_CLASSES,
+        dim=Config.TRANSFORMER_DIM,
+        depth=Config.TRANSFORMER_DEPTH,
+        heads=Config.TRANSFORMER_HEADS
+    )
+    model.load_state_dict(torch.load(Config.CHECKPOINT_PATHS["TabTransformer"], map_location=Config.DEVICE))
+    model.to(Config.DEVICE)
+    model.eval()
+    return model
 
-API_URL = "http://127.0.0.1:8000"  # Adjust if needed
+def load_attention_mlp():
+    model = AttentionMLP(
+        input_dim=Config.NUM_FEATURES,
+        hidden_dim=64,
+        num_classes=Config.NUM_CLASSES
+    )
+    model.load_state_dict(torch.load(Config.CHECKPOINT_PATHS["AttentionMLP"], map_location=Config.DEVICE))
+    model.to(Config.DEVICE)
+    model.eval()
+    return model
 
-def train_all_models():
-    st.info("Training all models (TabTransformer, GNN, AttentionMLP)...")
-    commands = [
-        "python scripts/train.py --model TabTransformer",
-        "python scripts/train.py --model GNN",
-        "python scripts/train.py --model AttentionMLP"
-    ]
-    logs = {}
-    for cmd in commands:
-        try:
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            logs[cmd] = result.stdout + "\n" + result.stderr
-        except Exception as e:
-            logs[cmd] = str(e)
-    return logs
+def load_gnn():
+    model = PatientGNN(
+        num_features=Config.NUM_FEATURES,
+        hidden_dim=128
+    )
+    model.load_state_dict(torch.load(Config.CHECKPOINT_PATHS["GNN"], map_location=Config.DEVICE))
+    model.to(Config.DEVICE)
+    model.eval()
+    return model
+
+def predict_model(model_choice, features):
+    tensor_input = torch.tensor([features], dtype=torch.float32).to(Config.DEVICE)
+
+    if model_choice == "TabTransformer":
+        model = load_tabtransformer()
+        with torch.no_grad():
+            output = model(tensor_input)
+        prediction = int(output.argmax(dim=1).item())
+
+    elif model_choice == "AttentionMLP":
+        model = load_attention_mlp()
+        with torch.no_grad():
+            output = model(tensor_input)
+        prediction = int(output.argmax(dim=1).item())
+
+    elif model_choice == "GNN":
+        x = torch.tensor([features], dtype=torch.float32)
+        edge_index = torch.tensor([[0], [0]], dtype=torch.long)
+        graph = Data(x=x, edge_index=edge_index).to(Config.DEVICE)
+        model = load_gnn()
+        with torch.no_grad():
+            output = model(graph)
+            output = output[0].unsqueeze(0)
+        prediction = int(output.argmax(dim=1).item())
+
+    elif model_choice == "Ensemble":
+        prediction = ensemble_predict(features)
+
+    else:
+        prediction = None
+
+    return prediction
 
 def main():
-    st.title("DiaTrend Trajectory Predictor Dashboard")
-    st.markdown("""
-    **Upload a DiaTrend Excel file** that has 'CGM' and 'Bolus' sheets.
-    We'll extract CGM data from 'mg/dl' column, Bolus data from columns like 'normal', 'carbInput', etc.,
-    and optionally merge demographics if the subject ID matches our metadata file.
-    """)
+    st.set_page_config(page_title="DiaTrend Analyzer", layout="wide")
+    st.title("Diabetes Trajectory Analysis")
 
-    # Upload file
-    uploaded_file = st.file_uploader("Upload Subject Excel File", type=["xlsx"])
-    if uploaded_file is not None:
-        # Try to read CGM and Bolus
+    model_choice = st.selectbox("Select Prediction Mode", ["TabTransformer", "AttentionMLP", "GNN", "Ensemble"])
+
+    uploaded_file = st.file_uploader("Upload subject data (XLSX)", type="xlsx")
+
+    if uploaded_file:
         try:
-            df_cgm = pd.read_excel(uploaded_file, sheet_name="CGM")
-            df_bolus = pd.read_excel(uploaded_file, sheet_name="Bolus")
-            st.success("Loaded CGM & Bolus sheets!")
-            st.write("CGM head:")
-            st.dataframe(df_cgm.head())
-            st.write("Bolus head:")
-            st.dataframe(df_bolus.head())
+            processor = DataProcessor()
+            demo_df = processor._load_demographics()
 
-            # Visualize CGM
-            if "mg/dl" in df_cgm.columns:
-                fig = plot_glucose_series(df_cgm["mg/dl"], title="CGM Glucose Readings")
+            # Convert UploadedFile to BytesIO for Pandas
+            file_buffer = BytesIO(uploaded_file.getvalue())
+
+            # Extract subject ID correctly
+            filename = uploaded_file.name
+
+            # Process file from in-memory buffer
+            features, _ = processor.process_file(file_buffer, demo_df, filename=filename)
+
+            with st.expander("Raw Data Preview"):
+                cgm_df = pd.read_excel(file_buffer, sheet_name="CGM")
+                st.dataframe(cgm_df.head())
+                fig = px.line(cgm_df, x=cgm_df.index, y='mg/dl', title="Continuous Glucose Monitoring")
                 st.plotly_chart(fig)
 
-                # Compute features
-                cgm_feats = extract_cgm_features(df_cgm["mg/dl"])
-                bolus_feats = extract_bolus_features(df_bolus)
-                
-                # Attempt demographics
-                df_demo = load_demographics(config.DEMOGRAPHICS_PATH)
-                # For demonstration, parse subject ID from filename
-                filename = os.path.basename(uploaded_file.name)
-                subject_id = filename.replace(".xlsx", "")  # e.g. "Subject21"
-                demo_feats = extract_demographics_features(subject_id, df_demo)
+            feature_names = [
+                "Average Glucose Level",
+                "Glucose Variability (Standard Deviation)",
+                "Glycemic Variability",
+                "Age",
+                "Hemoglobin A1C"
+            ]
 
-                # Merge all
-                all_feats = {}
-                all_feats.update(cgm_feats)
-                all_feats.update(bolus_feats)
-                all_feats.update(demo_feats)
+            feature_dict = {feature_names[i]: val for i, val in enumerate(features)}
 
-                # Compute target
-                tgt = compute_good_trajectory(df_cgm["mg/dl"])
-                
-                st.markdown("### Extracted Features")
-                st.write(all_feats)
-                st.markdown(f"**Computed Target (Good Trajectory)**: {tgt}")
+            st.subheader("Processed Features")
+            st.json(feature_dict)
 
-            else:
-                st.error("No 'mg/dl' column found in CGM sheet!")
+            prediction = predict_model(model_choice, features)
+
+            st.metric("Predicted Trajectory",
+                      value="Positive" if prediction == 1 else "Needs Intervention",
+                      delta="Good Control" if prediction == 1 else "High Risk")
+
         except Exception as e:
-            st.error(f"Error reading Excel file: {e}")
-
-    st.markdown("---")
-    st.header("Model Training & Evaluation")
-    if st.button("Train All Models"):
-        logs = train_all_models()
-        for cmd, log in logs.items():
-            st.text(f"{cmd}\n{log}\n")
-    
-    if st.button("Evaluate Models"):
-        st.info("Running 'python evaluation/evaluate_all.py'... Check terminal output/logs for results.")
-        subprocess.run("python evaluation/evaluate_all.py", shell=True)
-
-    st.markdown("---")
-    st.header("Query API for Predictions")
-    if st.button("Predict from This File via API"):
-        if uploaded_file is not None:
-            # We'll do a /predict_excel call
-            files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
-            try:
-                r = requests.post(f"{API_URL}/predict_excel", files=files)
-                if r.ok:
-                    st.success(f"API Prediction: {r.json()}")
-                else:
-                    st.error(f"API error: {r.text}")
-            except Exception as e:
-                st.error(f"Error contacting API: {e}")
-        else:
-            st.error("No file uploaded.")
+            st.error(f"Processing Error: {str(e)}")
 
 if __name__ == "__main__":
     main()

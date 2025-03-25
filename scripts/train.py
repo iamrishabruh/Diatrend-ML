@@ -1,108 +1,138 @@
-# File: scripts/train.py
-
+# scripts/train.py
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import logging
 import argparse
-import random
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import TensorDataset, DataLoader
-import glob
+from torch.utils.data import DataLoader, TensorDataset
+from config.config import Config
+from preprocessing.preprocessing import DataProcessor
+from sklearn.model_selection import train_test_split
+from torch_geometric.data import Data
+from torch_geometric.loader import DataLoader as GeoDataLoader
 
-import config
-from preprocessing.preprocessing import load_demographics, load_and_extract
-from models.tabtransformer import TabTransformer
-from models.gnn_model import PatientGNN
-from models.attention_mlp import AttentionMLP
+logger = logging.getLogger(__name__)
 
-# Set random seeds
-torch.manual_seed(config.SEED)
-np.random.seed(config.SEED)
-random.seed(config.SEED)
+def configure_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(Config.LOGS_DIR / "training.log"),
+            logging.StreamHandler()
+        ]
+    )
 
-def train_model(model, data_loader, num_epochs, checkpoint_path):
-    optimizer = optim.Adam(model.parameters(), lr=config.LEARNING_RATE)
-    criterion = nn.CrossEntropyLoss()
-    best_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_loss = 0.0
-        for X_batch, y_batch in data_loader:
-            X_batch = X_batch.to(config.DEVICE)
-            y_batch = y_batch.to(config.DEVICE)
-            optimizer.zero_grad()
-            outputs = model(X_batch)
-            loss = criterion(outputs, y_batch)
+class Trainer:
+    def __init__(self, model, device, class_weights=None):
+        self.model = model.to(device)
+        if class_weights is not None:
+            self.criterion = torch.nn.CrossEntropyLoss(weight=class_weights)
+        else:
+            self.criterion = torch.nn.CrossEntropyLoss()
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=Config.LEARNING_RATE)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, patience=3)
+        
+    def train_epoch(self, loader, is_graph=False):
+        self.model.train()
+        total_loss = 0
+        for batch in loader:
+            if is_graph:
+                data = batch.to(Config.DEVICE)
+                outputs = self.model(data)
+                labels = data.y.to(Config.DEVICE)
+            else:
+                inputs, labels = batch
+                inputs = inputs.to(Config.DEVICE)
+                labels = labels.to(Config.DEVICE)
+                outputs = self.model(inputs)
+            self.optimizer.zero_grad()
+            loss = self.criterion(outputs, labels)
+            if torch.isnan(loss):
+                logger.error("Loss is NaN. Check your inputs and model outputs.")
+                return float("nan")
             loss.backward()
-            optimizer.step()
-            epoch_loss += loss.item()
-        
-        avg_loss = epoch_loss / len(data_loader)
-        print(f"Epoch [{epoch+1}/{num_epochs}] - Loss: {avg_loss:.4f}")
-        
-        # Save checkpoint if improved
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            os.makedirs(os.path.dirname(checkpoint_path), exist_ok=True)
-            torch.save(model.state_dict(), checkpoint_path)
-            print(f"Checkpoint saved: {checkpoint_path} (Epoch {epoch+1}, Loss {best_loss:.4f})")
+            self.optimizer.step()
+            total_loss += loss.item()
+        return total_loss / len(loader)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--model', type=str, required=True,
-                        choices=["TabTransformer", "GNN", "AttentionMLP"],
-                        help="Model type to train.")
-    args = parser.parse_args()
-    
-    # Load demographics once
-    df_demo = load_demographics(config.DEMOGRAPHICS_PATH)
-    
-    # Load all subject Excel files
-    file_list = glob.glob(os.path.join(config.RAW_DATA_PATH, "*.xlsx"))
-    X_list, y_list = [], []
-    for file_path in file_list:
-        try:
-            feats, tgt = load_and_extract(file_path, df_demo)
-            X_list.append(feats)
-            y_list.append(tgt)
-        except Exception as e:
-            print(f"Error processing {file_path}: {e}")
-    
-    if len(X_list) == 0:
-        print("No data loaded. Check your data files or naming conventions.")
-        return
-    
-    X = np.array(X_list, dtype=np.float32)
-    y = np.array(y_list, dtype=np.int64)
-    print(f"Loaded {X.shape[0]} subjects. Feature dim = {X.shape[1]}.")
-    
-    dataset = TensorDataset(torch.tensor(X), torch.tensor(y))
-    data_loader = DataLoader(dataset, batch_size=config.BATCH_SIZE, shuffle=True)
-    
-    # Create model
-    if args.model == "TabTransformer":
-        model = TabTransformer(num_features=X.shape[1],
-                               num_classes=config.NUM_CLASSES,
-                               dim=config.TRANSFORMER_DIM,
-                               depth=config.TRANSFORMER_DEPTH)
-        ckpt = config.CHECKPOINT_PATHS["TabTransformer"]
-    elif args.model == "GNN":
-        model = PatientGNN(num_features=X.shape[1], hidden_dim=config.GNN_HIDDEN_DIM)
-        ckpt = config.CHECKPOINT_PATHS["GNN"]
-        # Real GNN usage requires building a graph. 
-        # For demonstration, we treat X as if it was a single batch. 
-        # This might not be correct unless you implement a graph building pipeline.
-    elif args.model == "AttentionMLP":
-        model = AttentionMLP(input_dim=X.shape[1], hidden_dim=config.ATTENTION_HIDDEN_DIM,
-                             num_classes=config.NUM_CLASSES)
-        ckpt = config.CHECKPOINT_PATHS["AttentionMLP"]
-    
-    model.to(config.DEVICE)
-    
-    # Train
-    train_model(model, data_loader, config.NUM_EPOCHS, ckpt)
+def main(model_type):
+    configure_logging()
+    torch.manual_seed(Config.SEED)
+    np.random.seed(Config.SEED)
+
+    processor = DataProcessor()
+    features, labels = processor.load_dataset()
+    X_train, X_temp, y_train, y_temp = train_test_split(features, labels, test_size=0.3, random_state=Config.SEED)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.33, random_state=Config.SEED)
+
+    if model_type in ["TabTransformer", "AttentionMLP"]:
+        dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
+        loader = DataLoader(dataset, batch_size=Config.BATCH_SIZE, shuffle=True)
+        is_graph = False
+    elif model_type == "GNN":
+        from models.gnn_model import PatientGNN
+        model = PatientGNN(num_features=Config.NUM_FEATURES, hidden_dim=128)
+        X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+        y_train_tensor = torch.tensor(y_train, dtype=torch.long)
+        num_nodes = X_train_tensor.shape[0]
+        edge_index = torch.tensor([[i, j] for i in range(num_nodes) for j in range(num_nodes) if i != j], dtype=torch.long).t().contiguous()
+        train_graph = Data(x=X_train_tensor, edge_index=edge_index, y=y_train_tensor)
+        loader = GeoDataLoader([train_graph], batch_size=1, shuffle=True)
+        is_graph = True
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
+    if model_type == "TabTransformer":
+        from models.tabtransformer import TabTransformer
+        model = TabTransformer(
+            num_features=Config.NUM_FEATURES,
+            num_classes=Config.NUM_CLASSES,
+            dim=Config.TRANSFORMER_DIM,
+            depth=Config.TRANSFORMER_DEPTH,
+            heads=Config.TRANSFORMER_HEADS
+        )
+    elif model_type == "AttentionMLP":
+        from models.attention_mlp import AttentionMLP
+        model = AttentionMLP(
+            input_dim=Config.NUM_FEATURES,
+            hidden_dim=64,
+            num_classes=Config.NUM_CLASSES
+        )
+
+    # Compute class weights based on y_train
+    unique, counts = np.unique(y_train, return_counts=True)
+    weights = np.zeros(unique.max()+1, dtype=np.float32)
+    for cls, cnt in zip(unique, counts):
+        weights[cls] = 1.0/cnt
+    weights = weights / weights.sum() * len(unique)
+    class_weights = torch.tensor(weights, dtype=torch.float32, device=Config.DEVICE)
+
+    trainer = Trainer(model, Config.DEVICE, class_weights=class_weights)
+    best_loss = float("inf")
+    patience_counter = 0
+
+    for epoch in range(Config.NUM_EPOCHS):
+        train_loss = trainer.train_epoch(loader, is_graph=is_graph)
+        logger.info(f"Epoch {epoch+1}/{Config.NUM_EPOCHS} - Loss: {train_loss:.4f}")
+        if np.isnan(train_loss):
+            logger.error("Training halted due to NaN loss.")
+            break
+        if train_loss < best_loss:
+            best_loss = train_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), Config.CHECKPOINT_PATHS[model_type])
+        else:
+            patience_counter += 1
+            if patience_counter >= Config.EARLY_STOP_PATIENCE:
+                logger.info(f"Early stopping triggered for {model_type}")
+                break
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Train DiaTrend models")
+    parser.add_argument("--model", type=str, required=True, choices=["TabTransformer", "GNN", "AttentionMLP"], help="Model architecture to train")
+    args = parser.parse_args()
+    main(args.model)

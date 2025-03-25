@@ -1,66 +1,51 @@
-# File: api/api_server.py
-
-from fastapi import FastAPI, UploadFile, File
-from pydantic import BaseModel
+from fastapi import FastAPI, File, UploadFile, HTTPException
 import torch
-import pandas as pd
-import io
-import os
+import logging
+from pathlib import Path
+from io import BytesIO
 
-import config
-from models.tabtransformer import TabTransformer
-from preprocessing.preprocessing import load_cgm_sheet, extract_cgm_features, compute_good_trajectory
+from config.config import Config
+from preprocessing.preprocessing import DataProcessor
+from models.tabtransformer import TabTransformer  # Added import
 
-app = FastAPI(title="DiaTrend Trajectory Prediction API")
+app = FastAPI()
+logger = logging.getLogger("api")
 
-# Load the TabTransformer checkpoint by default
-model = TabTransformer(num_features=config.NUM_FEATURES,
-                       num_classes=config.NUM_CLASSES,
-                       dim=config.TRANSFORMER_DIM,
-                       depth=config.TRANSFORMER_DEPTH)
-checkpoint_path = config.CHECKPOINT_PATHS["TabTransformer"]
-try:
-    model.load_state_dict(torch.load(checkpoint_path, map_location=config.DEVICE))
-    model.to(config.DEVICE)
-    model.eval()
-    print("Model loaded successfully.")
-except Exception as e:
-    print(f"Error loading model checkpoint: {e}")
-
-class PredictRequest(BaseModel):
-    features: dict  # a dictionary of {feature_name: value}
+class PredictionModel:
+    def __init__(self):
+        self.model = None
+        self.processor = DataProcessor()
+        
+    def load_model(self, model_path: Path):
+        if not model_path.exists():
+            raise FileNotFoundError("Model checkpoint missing")
+        self.model = TabTransformer(
+            num_features=Config.NUM_FEATURES,
+            num_classes=Config.NUM_CLASSES,
+            dim=Config.TRANSFORMER_DIM,
+            depth=Config.TRANSFORMER_DEPTH,
+            heads=Config.TRANSFORMER_HEADS
+        )
+        self.model.load_state_dict(torch.load(model_path, map_location=Config.DEVICE))
+        self.model.to(Config.DEVICE)
+        self.model.eval()
+        
+model_wrapper = PredictionModel()
+model_wrapper.load_model(Config.CHECKPOINTS / "TabTransformer_best.pt")
 
 @app.post("/predict")
-def predict(request: PredictRequest):
-    """
-    Predict from a dictionary of features. 
-    The code expects sorted feature keys to match training order.
-    """
-    sorted_keys = sorted(request.features.keys())
-    vector = [request.features[k] for k in sorted_keys]
-    x = torch.tensor(vector).float().unsqueeze(0).to(config.DEVICE)
-    with torch.no_grad():
-        output = model(x)
-    pred = output.argmax(dim=1).item()
-    return {"prediction": pred}
-
-@app.post("/predict_excel")
-def predict_excel(file: UploadFile = File(...)):
-    """
-    Predict from an Excel file that has a 'CGM' sheet with 'mg/dl' column.
-    We'll only use CGM features here for demonstration.
-    """
+async def predict(file: UploadFile = File(...)):
     try:
-        contents = file.file.read()
-        df_cgm = pd.read_excel(io.BytesIO(contents), sheet_name="CGM")
-        # Extract CGM features
-        cgm_feats = extract_cgm_features(df_cgm["mg/dl"])
-        sorted_keys = sorted(cgm_feats.keys())
-        vector = [cgm_feats[k] for k in sorted_keys]
-        x = torch.tensor(vector).float().unsqueeze(0).to(config.DEVICE)
+        contents = await file.read()
+        file_obj = BytesIO(contents)
+        if hasattr(file, "filename"):
+            file_obj.name = file.filename
+        features = model_wrapper.processor.process_file(file_obj, 
+                            model_wrapper.processor._load_demographics())
+        tensor = torch.tensor([features], dtype=torch.float32).to(Config.DEVICE) ## TYPE ERROR PREDICTION
         with torch.no_grad():
-            output = model(x)
-        pred = output.argmax(dim=1).item()
-        return {"prediction": pred}
+            output = model_wrapper.model(tensor)
+        return {"prediction": int(output.argmax().item())}
     except Exception as e:
-        return {"error": str(e)}
+        logger.error(f"Prediction failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
