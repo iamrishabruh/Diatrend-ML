@@ -1,4 +1,3 @@
-# config/config.py
 import os
 from pathlib import Path
 import torch
@@ -14,24 +13,28 @@ class Config:
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Model parameters
+    # Common Model parameters
     NUM_FEATURES = 5  # [CGM mean, CGM std, glycemic variability, Age, Hemoglobin A1C]
     NUM_CLASSES = 2
-    TRANSFORMER_DIM = 128
-    TRANSFORMER_DEPTH = 8
-    TRANSFORMER_HEADS = 8
+    TRANSFORMER_DIM = 64
+    TRANSFORMER_DEPTH = 4
+    TRANSFORMER_HEADS = 4
 
     # Training parameters
-    BATCH_SIZE = 32
+    BATCH_SIZE = 8
     NUM_EPOCHS = 50
-    LEARNING_RATE = 1e-2
-    EARLY_STOP_PATIENCE = 5
+    LEARNING_RATE = 1e-3
+    EARLY_STOP_PATIENCE = 10
     SEED = 42
 
-    CHECKPOINT_PATHS = {
-        "TabTransformer": CHECKPOINTS / "TabTransformer_best.pt",
-        "GNN": CHECKPOINTS / "GNN_best.pt",
-        "AttentionMLP": CHECKPOINTS / "AttentionMLP_best.pt"
-    }
+    # GNN-specific parameters
+    GNN_HIDDEN_DIM = 128
+    GNN_NUM_LAYERS = 2
+    GNN_DROPOUT = 0.4
+    GNN_K_NEIGHBORS = 5  # Use k-nearest neighbors for graph construction
+
+    # Synthetic augmentation settings
+    AUGMENT_TRAIN = True
+    AUGMENT_K_NEIGHBORS = 3
 
     LOG_LEVEL = "INFO"

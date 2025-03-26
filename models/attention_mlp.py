@@ -2,13 +2,18 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from config.config import Config
 
 class AttentionMLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim=256, num_classes=2, dropout=0.3):
+    def __init__(self, 
+                 input_dim=Config.NUM_FEATURES, 
+                 hidden_dim=256, 
+                 num_classes=Config.NUM_CLASSES, 
+                 dropout=0.3):
         """
         Attention MLP for tabular data with increased capacity.
-        - hidden_dim increased to 256.
-        - Extra hidden layer added.
+        - Uses a hidden dimension of 256.
+        - Contains extra hidden layers with dropout for improved regularization.
         """
         super(AttentionMLP, self).__init__()
         self.fc1 = nn.Linear(input_dim, hidden_dim)

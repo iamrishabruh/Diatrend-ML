@@ -1,14 +1,19 @@
 # models/tabtransformer.py
 import torch
 import torch.nn as nn
+from config.config import Config
 
 class TabTransformer(nn.Module):
-    def __init__(self, num_features, num_classes, dim=128, depth=8, heads=8, dropout=0.3):
+    def __init__(self, 
+                 num_features=Config.NUM_FEATURES, 
+                 num_classes=Config.NUM_CLASSES, 
+                 dim=Config.TRANSFORMER_DIM, 
+                 depth=Config.TRANSFORMER_DEPTH, 
+                 heads=Config.TRANSFORMER_HEADS, 
+                 dropout=0.3):
         """
         TabTransformer for tabular data with increased capacity.
-        - dim: 128
-        - depth: 8
-        - heads: number of attention heads
+        Uses hyperparameters defined in Config.
         """
         super(TabTransformer, self).__init__()
         self.embed = nn.Linear(num_features, dim)
@@ -26,8 +31,8 @@ class TabTransformer(nn.Module):
 
     def forward(self, x):
         # x shape: [batch_size, num_features]
-        x = x.unsqueeze(1)  # [batch_size, 1, num_features]
-        x = self.embed(x)   # [batch_size, 1, dim]
-        x = self.transformer(x)  # [batch_size, 1, dim]
-        x = x.mean(dim=1)   # [batch_size, dim]
+        x = x.unsqueeze(1)          # [batch_size, 1, num_features]
+        x = self.embed(x)           # [batch_size, 1, dim]
+        x = self.transformer(x)     # [batch_size, 1, dim]
+        x = x.mean(dim=1)          # [batch_size, dim]
         return self.classifier(x)
