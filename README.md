@@ -1,6 +1,8 @@
 # DiaTrend: AI-Driven CGM Trajectory Prediction System
 DiaTrend is an AI-driven system designed to predict continuous glucose monitoring (CGM) trajectories, supporting proactive diabetes management. The project addresses key challenges—including temporal variability, sensor noise, and individual differences—by extracting advanced temporal features from CGM data and applying state-of-the-art machine learning models. In doing so, DiaTrend bridges clinical guidelines with modern AI techniques to provide interpretable, real-time predictions.
 
+Dataset here: https://www.synapse.org/Synapse:syn38187184/wiki/619490
+
 ## Features
 - **Advanced Feature Extraction:**
 
